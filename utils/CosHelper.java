@@ -12,6 +12,8 @@ import com.qcloud.cos.auth.COSCredentials;
 import com.qcloud.cos.region.Region;
 import com.qcloud.cos.model.*;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.InputStream;
 
@@ -64,29 +66,75 @@ public final class CosHelper {
 	}
 
 	/** Upload จาก Mendix FileDocument → COS */
-	public static String uploadFileDocument(IContext ctx, IMendixObject fileDoc, String secretId, String secretKey,
-			String regionName, String bucketName, String cosKey) {
-		COSClient c = createClient(secretId, secretKey, regionName);
-		try (InputStream in = Core.getFileDocumentContent(ctx, fileDoc)) {
-			ObjectMetadata meta = new ObjectMetadata();
-			Long size = (Long) fileDoc.getValue(ctx, "Size");
-			if (size != null && size >= 0)
-				meta.setContentLength(size);
-			String name = (String) fileDoc.getValue(ctx, "Name");
-			if (name != null)
-				meta.setContentDisposition("inline; filename=\"" + name + "\"");
-// content type (optional): ถ้ามี attr เก็บ mimetype เองค่อย set, มิฉะนั้น COS จะเดา
-			PutObjectRequest req = new PutObjectRequest(bucketName, cosKey, in, meta);
-			c.putObject(req);
+	public static String uploadFileDocument(
+	        IContext ctx,
+	        IMendixObject fileDoc,
+	        String secretId,
+	        String secretKey,
+	        String regionName,
+	        String bucketName,
+	        String cosKeyPrefix
+	) {
+	    COSClient c = createClient(secretId, secretKey, regionName);
 
-// ✅ ตรวจว่าอยู่จริงทันที
-			c.getObjectMetadata(bucketName, cosKey);
-			return "✅ " + cosKey;
-		} catch (Exception e) {
-			return "❌ " + e.getMessage();
-		} finally {
-			c.shutdown();
-		}
+	    bucketName = bucketName == null ? null : bucketName.trim();
+	    cosKeyPrefix = cosKeyPrefix == null ? "" : cosKeyPrefix.trim();
+
+	    if (bucketName == null || bucketName.isEmpty()) return "❌ bucketName is empty";
+
+	    // Build a real object key (must not end with "/" only)
+	    String filename = (String) fileDoc.getValue(ctx, "Name");
+	    if (filename == null || filename.isBlank()) filename = "file.bin";
+	    filename = filename.replace("\\", "_").replace("/", "_").replace("\"", "");
+
+	    String key;
+	    if (cosKeyPrefix.isEmpty()) {
+	        key = filename;
+	    } else {
+	        // ensure exactly one "/" between prefix and filename
+	        if (!cosKeyPrefix.endsWith("/")) cosKeyPrefix += "/";
+	        key = cosKeyPrefix + filename;
+	    }
+
+	    try (InputStream in = Core.getFileDocumentContent(ctx, fileDoc)) {
+	        if (in == null) return "❌ FileDocument content stream is null";
+
+	        byte[] data = readAllBytes(in);
+	        if (data.length == 0) return "❌ Upload aborted: File content is 0 bytes";
+
+	        ObjectMetadata meta = new ObjectMetadata();
+	        meta.setContentLength(data.length);
+	        meta.setContentDisposition("inline; filename=\"" + filename + "\"");
+
+	        PutObjectRequest req = new PutObjectRequest(bucketName, key, new ByteArrayInputStream(data), meta);
+	        PutObjectResult result = c.putObject(req);
+
+	        ObjectMetadata verified = c.getObjectMetadata(bucketName, key);
+
+	        String url;
+	        try { url = c.getObjectUrl(bucketName, key).toString(); }
+	        catch (Exception ex) { url = "(url not available)"; }
+
+	        return "✅ uploaded"
+	                + " bucket=[" + bucketName + "]"
+	                + " key=[" + key + "]"
+	                + " etag=" + result.getETag()
+	                + " len=" + verified.getContentLength()
+	                + " url=" + url;
+
+	    } catch (Exception e) {
+	        return "❌ " + e.getClass().getSimpleName() + ": " + e.getMessage();
+	    } finally {
+	        c.shutdown();
+	    }
+	}
+
+	private static byte[] readAllBytes(InputStream in) throws Exception {
+	    ByteArrayOutputStream bos = new ByteArrayOutputStream();
+	    byte[] buf = new byte[8192];
+	    int r;
+	    while ((r = in.read(buf)) != -1) bos.write(buf, 0, r);
+	    return bos.toByteArray();
 	}
 
 	public static String downloadToPath(String secretId, String secretKey, String regionName, String bucketName,
